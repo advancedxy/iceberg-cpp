@@ -21,10 +21,12 @@
 
 #include <limits>
 #include <memory>
+#include <tuple>
 
 #include "iceberg/expression/expressions.h"
 #include "iceberg/schema.h"
 #include "iceberg/test/matchers.h"
+#include "iceberg/transform.h"
 #include "iceberg/type.h"
 
 namespace iceberg {
@@ -258,6 +260,62 @@ TEST_F(PredicateTest, BoundReferenceEquality) {
   // Different fields should not be equal
   EXPECT_FALSE(bound1->Equals(*bound3));
   EXPECT_FALSE(bound3->Equals(*bound1));
+}
+
+class NestedReferenceTest
+    : public ::testing::TestWithParam<std::tuple<bool, bool, bool>> {};
+
+TEST_P(NestedReferenceTest, Nullability) {
+  const auto [outer_optional, inner_optional, leaf_optional] = GetParam();
+  auto inner = struct_({SchemaField::MakeOptional(5, "sibling", int32()),
+                        SchemaField(6, "value", int32(), leaf_optional)});
+  auto outer = struct_({SchemaField::MakeOptional(3, "sibling", int32()),
+                        SchemaField(4, "inner", inner, inner_optional)});
+  Schema schema({SchemaField::MakeOptional(1, "sibling", int32()),
+                 SchemaField(2, "outer", outer, outer_optional)});
+  const bool nullable = outer_optional || inner_optional || leaf_optional;
+
+  for (bool case_sensitive : {true, false}) {
+    const std::string name = case_sensitive ? "outer.inner.value" : "OUTER.INNER.VALUE";
+    ICEBERG_UNWRAP_OR_FAIL(auto reference,
+                           Expressions::Ref(name)->Bind(schema, case_sensitive));
+    EXPECT_EQ(reference->MayProduceNull(), nullable);
+    EXPECT_EQ(reference->field().optional(), leaf_optional);
+
+    ICEBERG_UNWRAP_OR_FAIL(auto is_null,
+                           Expressions::IsNull(name)->Bind(schema, case_sensitive));
+    ICEBERG_UNWRAP_OR_FAIL(auto not_null,
+                           Expressions::NotNull(name)->Bind(schema, case_sensitive));
+    EXPECT_EQ(is_null->op(),
+              nullable ? Expression::Operation::kIsNull : Expression::Operation::kFalse);
+    EXPECT_EQ(not_null->op(),
+              nullable ? Expression::Operation::kNotNull : Expression::Operation::kTrue);
+
+    std::shared_ptr<UnboundTerm<BoundTransform>> identity =
+        Expressions::Transform(name, Transform::Identity());
+    ICEBERG_UNWRAP_OR_FAIL(auto transformed, identity->Bind(schema, case_sensitive));
+    EXPECT_EQ(transformed->MayProduceNull(), nullable);
+    ICEBERG_UNWRAP_OR_FAIL(auto transformed_is_null,
+                           Expressions::IsNull(identity)->Bind(schema, case_sensitive));
+    EXPECT_EQ(transformed_is_null->op(), is_null->op());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Optionality, NestedReferenceTest,
+                         ::testing::Combine(::testing::Bool(), ::testing::Bool(),
+                                            ::testing::Bool()));
+
+TEST_F(PredicateTest, BoundReferenceEqualityIncludesNullability) {
+  for (bool optional : {false, true}) {
+    auto type = struct_({SchemaField(2, "value", int32(), optional)});
+    Schema required_schema({SchemaField::MakeRequired(1, "parent", type)});
+    Schema optional_schema({SchemaField::MakeOptional(1, "parent", type)});
+    auto reference = Expressions::Ref("parent.value");
+    ICEBERG_UNWRAP_OR_FAIL(auto required, reference->Bind(required_schema, true));
+    ICEBERG_UNWRAP_OR_FAIL(auto nullable, reference->Bind(optional_schema, true));
+    EXPECT_EQ(required->Equals(*nullable), optional);
+    EXPECT_EQ(nullable->Equals(*required), optional);
+  }
 }
 
 TEST_F(PredicateTest, UnboundPredicateCreation) {

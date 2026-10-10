@@ -136,8 +136,11 @@ class ICEBERG_EXPORT BoundReference
   /// \brief Create a bound reference.
   ///
   /// \param field The schema field
+  /// \param accessor The accessor for the field
+  /// \param has_optional_ancestor Whether any ancestor struct field is optional
   static Result<std::unique_ptr<BoundReference>> Make(
-      SchemaField field, std::unique_ptr<StructLikeAccessor> accessor);
+      SchemaField field, std::unique_ptr<StructLikeAccessor> accessor,
+      bool has_optional_ancestor = false);
 
   ~BoundReference() override;
 
@@ -155,7 +158,7 @@ class ICEBERG_EXPORT BoundReference
 
   int32_t field_id() const { return field_.field_id(); }
 
-  bool MayProduceNull() const override { return field_.optional(); }
+  bool MayProduceNull() const override { return may_produce_null_; }
 
   bool Equals(const BoundTerm& other) const override;
 
@@ -164,10 +167,12 @@ class ICEBERG_EXPORT BoundReference
   const StructLikeAccessor& accessor() const { return *accessor_; }
 
  private:
-  BoundReference(SchemaField field, std::unique_ptr<StructLikeAccessor> accessor);
+  BoundReference(SchemaField field, std::unique_ptr<StructLikeAccessor> accessor,
+                 bool has_optional_ancestor);
 
   SchemaField field_;
   std::unique_ptr<StructLikeAccessor> accessor_;
+  bool may_produce_null_;
 };
 
 /// \brief An unbound transform expression.

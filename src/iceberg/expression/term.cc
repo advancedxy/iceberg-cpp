@@ -68,7 +68,20 @@ Result<std::shared_ptr<BoundReference>> NamedReference::Bind(const Schema& schem
   int32_t field_id = field_opt.value().get().field_id();
   ICEBERG_ASSIGN_OR_RAISE(auto accessor, schema.GetAccessorById(field_id));
 
-  return BoundReference::Make(field_opt.value().get(), std::move(accessor));
+  // A required leaf can still produce null through an optional ancestor struct.
+  bool has_optional_ancestor = false;
+  const StructType* current = &schema;
+  const auto& path = accessor->position_path();
+  for (size_t i = 0; i + 1 < path.size(); ++i) {
+    const auto& ancestor = current->fields()[path[i]];
+    if (ancestor.optional()) {
+      has_optional_ancestor = true;
+      break;
+    }
+    current = static_cast<const StructType*>(ancestor.type().get());
+  }
+  return BoundReference::Make(field_opt.value().get(), std::move(accessor),
+                              has_optional_ancestor);
 }
 
 std::string NamedReference::ToString() const {
@@ -77,7 +90,8 @@ std::string NamedReference::ToString() const {
 
 // BoundReference implementation
 Result<std::unique_ptr<BoundReference>> BoundReference::Make(
-    SchemaField field, std::unique_ptr<StructLikeAccessor> accessor) {
+    SchemaField field, std::unique_ptr<StructLikeAccessor> accessor,
+    bool has_optional_ancestor) {
   if (auto status = field.Validate(); !status.has_value()) [[unlikely]] {
     return InvalidExpression("Cannot create BoundReference with invalid field: {}",
                              status.error().message);
@@ -86,12 +100,15 @@ Result<std::unique_ptr<BoundReference>> BoundReference::Make(
     return InvalidExpression("Cannot create BoundReference without accessor");
   }
   return std::unique_ptr<BoundReference>(
-      new BoundReference(std::move(field), std::move(accessor)));
+      new BoundReference(std::move(field), std::move(accessor), has_optional_ancestor));
 }
 
 BoundReference::BoundReference(SchemaField field,
-                               std::unique_ptr<StructLikeAccessor> accessor)
-    : field_(std::move(field)), accessor_(std::move(accessor)) {
+                               std::unique_ptr<StructLikeAccessor> accessor,
+                               bool has_optional_ancestor)
+    : field_(std::move(field)),
+      accessor_(std::move(accessor)),
+      may_produce_null_(field_.optional() || has_optional_ancestor) {
   ICEBERG_DCHECK(field_.Validate().has_value(),
                  "Cannot create BoundReference with invalid field");
   ICEBERG_DCHECK(accessor_ != nullptr, "Cannot create BoundReference without accessor");
@@ -115,6 +132,7 @@ bool BoundReference::Equals(const BoundTerm& other) const {
   const auto& other_ref = internal::checked_cast<const BoundReference&>(other);
   return field_.field_id() == other_ref.field_.field_id() &&
          field_.optional() == other_ref.field_.optional() &&
+         may_produce_null_ == other_ref.may_produce_null_ &&
          *field_.type() == *other_ref.field_.type();
 }
 
